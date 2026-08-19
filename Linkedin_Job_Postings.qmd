@@ -1,0 +1,463 @@
+---
+title: "LinkedIn Job Salary Modeling"
+author:
+  - Ian Walsh
+  - Logan Rosell
+date: "2026-04-18"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: right
+    code-fold: true
+    code-summary: "Show code"
+    number-sections: true
+    df-print: paged
+    smooth-scroll: true
+    embed-resources: true
+    self-contained-math: true
+execute:
+  echo: false
+  warning: false
+  message: false
+editor: visual
+---
+
+## Project overview
+
+This report builds a salary classification workflow using LinkedIn job posting data. The goal is to predict whether a posting falls into a lower-, middle-, or upper-salary bin based on text, job metadata, and location fields.
+
+::: {.callout-note}
+## Data sources
+
+- [LinkedIn Job Postings dataset (Kaggle)](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings)
+- [Income bracket reference (Investopedia)](https://www.investopedia.com/upper-middle-and-lower-income-brackets-defined-how-much-income-counts-for-each-category-11932486)
+:::
+
+## Setup
+
+```{python}
+#| echo: true
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder, StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, cohen_kappa_score, classification_report
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+```
+
+```{python}
+jobs = pd.read_csv('data/postings.csv')
+jobs.head()
+```
+
+## Data preparation
+
+### Cleaning salary values
+
+The `normalized_salary` field contains missing values and a small number of extreme observations. To create a more stable modeling dataset, we first remove postings with missing salary information. We then trim observations below the 3rd percentile and above the 99th percentile of the remaining salary distribution.
+
+Salary categories were defined using 2024 U.S. median household income benchmarks described by [Investopedia](https://www.investopedia.com/upper-middle-and-lower-income-brackets-defined-how-much-income-counts-for-each-category-11932486). The thresholds use two-thirds of the median household income for the lower-income cutoff and twice the median household income for the upper-income cutoff.
+
+| Salary bin | Annual normalized salary |
+|---|---:|
+| Lower | $0 to $55,819 |
+| Middle | $55,820 to $167,459 |
+| Upper | $167,460 and above |
+
+```{python}
+#| echo: true
+jobs = jobs.copy()
+
+jobs['state'] = jobs['location'].str.split(',', n=1).str[1].str.strip()
+jobs['state'] = jobs['state'].where(jobs['state'].str.len() == 2)
+
+jobs_cleaned = jobs.loc[jobs['normalized_salary'].notna()].copy()
+
+lower_bound = jobs_cleaned['normalized_salary'].quantile(0.03)
+upper_bound = jobs_cleaned['normalized_salary'].quantile(0.99)
+
+jobs_cleaned = jobs_cleaned.loc[
+    jobs_cleaned['normalized_salary'].between(lower_bound, upper_bound)
+].copy()
+
+bins = [0, 55820, 167460, float('inf')]
+labels = ['lower', 'middle', 'upper']
+jobs_cleaned['normalized_salary_bins'] = pd.cut(
+    jobs_cleaned['normalized_salary'],
+    bins=bins,
+    labels=labels,
+    include_lowest=True
+)
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(9, 5))
+sns.histplot(data=jobs_cleaned, x='normalized_salary', bins=40, ax=ax)
+ax.set_title('Normalized Salary Distribution After Trimming')
+ax.set_xlabel('Normalized salary')
+plt.show()
+```
+
+### Salary bin balance
+
+```{python}
+jobs_cleaned['normalized_salary_bins'].value_counts(dropna=False).sort_index()
+```
+
+## Feature engineering
+
+### Train-test split
+
+```{python}
+feature_cols = [
+    'company_name', 'title', 'description',
+    'pay_period', 'formatted_work_type', 'application_type',
+    'formatted_experience_level', 'state', 'views'
+]
+
+model_df = jobs_cleaned[feature_cols + ['normalized_salary', 'normalized_salary_bins']].copy()
+
+X = model_df[feature_cols].copy()
+y = model_df[['normalized_salary', 'normalized_salary_bins']].copy()
+
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=0, stratify=y['normalized_salary_bins']
+)
+```
+
+### Text features
+
+`skills_desc` is excluded because it is mostly missing.
+
+```{python}
+#| echo: true
+text_vectorizer = TfidfVectorizer(
+    max_df=0.90,
+    min_df=0.005,
+    max_features=100,
+    stop_words='english',
+    ngram_range=(1, 2)
+)
+
+text_cols = ['company_name', 'title', 'description']
+text_train_parts = []
+text_test_parts = []
+
+for col in text_cols:
+    X_train_raw[col] = X_train_raw[col].fillna('').astype(str)
+    X_test_raw[col] = X_test_raw[col].fillna('').astype(str)
+
+    train_mat = text_vectorizer.fit_transform(X_train_raw[col])
+    test_mat = text_vectorizer.transform(X_test_raw[col])
+
+    train_df = pd.DataFrame(
+        train_mat.toarray(),
+        columns=text_vectorizer.get_feature_names_out(),
+        index=X_train_raw.index
+    ).add_prefix(f'{col}_')
+
+    test_df = pd.DataFrame(
+        test_mat.toarray(),
+        columns=text_vectorizer.get_feature_names_out(),
+        index=X_test_raw.index
+    ).add_prefix(f'{col}_')
+
+    text_train_parts.append(train_df)
+    text_test_parts.append(test_df)
+
+train_text = pd.concat(text_train_parts, axis=1)
+test_text = pd.concat(text_test_parts, axis=1)
+```
+
+### Categorical features
+
+```{python}
+#| echo: true
+cat_cols = [
+    'pay_period', 'formatted_work_type', 'application_type',
+    'formatted_experience_level', 'state'
+]
+
+cat_encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+
+X_train_cat_raw = X_train_raw[cat_cols].fillna('').astype(str)
+X_test_cat_raw = X_test_raw[cat_cols].fillna('').astype(str)
+
+train_cat = pd.DataFrame(
+    cat_encoder.fit_transform(X_train_cat_raw),
+    columns=cat_encoder.get_feature_names_out(cat_cols),
+    index=X_train_raw.index
+)
+
+test_cat = pd.DataFrame(
+    cat_encoder.transform(X_test_cat_raw),
+    columns=cat_encoder.get_feature_names_out(cat_cols),
+    index=X_test_raw.index
+)
+```
+
+### Numeric features
+
+```{python}
+views_median = X_train_raw['views'].median()
+
+train_views = X_train_raw['views'].fillna(views_median).to_frame(name='views')
+test_views = X_test_raw['views'].fillna(views_median).to_frame(name='views')
+```
+
+### Combined feature matrix
+
+```{python}
+X_train_base = pd.concat([train_views, train_text, train_cat], axis=1)
+X_test_base = pd.concat([test_views, test_text, test_cat], axis=1)
+
+X_train_base.shape, X_test_base.shape
+```
+
+### PCA summary
+
+PCA is used here as a compact representation of the engineered feature space.
+
+```{python}
+#| echo: true
+pca = PCA(n_components=5, random_state=0)
+
+X_train_pca = pd.DataFrame(
+    pca.fit_transform(X_train_base),
+    index=X_train_base.index,
+    columns=[f'PCA_{i}' for i in range(1, 6)]
+)
+
+X_test_pca = pd.DataFrame(
+    pca.transform(X_test_base),
+    index=X_test_base.index,
+    columns=[f'PCA_{i}' for i in range(1, 6)]
+)
+
+pca_variance = pd.DataFrame({
+    'component': X_train_pca.columns,
+    'explained_variance_ratio': pca.explained_variance_ratio_
+})
+pca_variance
+```
+
+## Baseline regression screening
+
+A linear regression on the continuous salary target provides a rough screening step for potentially useful engineered predictors.
+
+```{python}
+#| echo: true
+regression = LinearRegression()
+regression.fit(X_train_base, y_train['normalized_salary'])
+
+X2 = sm.add_constant(X_train_base)
+est2 = sm.OLS(y_train['normalized_salary'], X2).fit()
+
+p_values = est2.pvalues
+significant_vars = p_values[p_values < 0.05].index.drop('const').tolist()
+len(significant_vars)
+print(est2.summary())
+```
+
+```{python}
+#| echo: true
+X_train_sig = pd.concat([X_train_base[significant_vars], X_train_pca], axis=1)
+X_test_sig = pd.concat([X_test_base[significant_vars], X_test_pca], axis=1)
+
+X_train_sig.shape, X_test_sig.shape
+```
+
+## Modeling
+
+### Random forest
+
+The random forest was the strongest and most interpretable model.
+
+```{python}
+forest_model = RandomForestClassifier(
+    random_state=0,
+    n_estimators=200,
+    max_features=0.3,
+    n_jobs=-1
+)
+forest_model.fit(X_train_sig, y_train['normalized_salary_bins'])
+
+forest_pred_test = forest_model.predict(X_test_sig)
+forest_kappa = cohen_kappa_score(y_test['normalized_salary_bins'], forest_pred_test)
+forest_kappa
+```
+
+```{python}
+ConfusionMatrixDisplay.from_predictions(
+    y_test['normalized_salary_bins'],
+    forest_pred_test,
+    display_labels=forest_model.classes_,
+    cmap='Blues'
+)
+plt.title('Random Forest Confusion Matrix')
+plt.show()
+```
+
+```{python}
+forest_importance = (
+    pd.Series(forest_model.feature_importances_, index=X_train_sig.columns)
+    .sort_values(ascending=False)
+    .head(15)
+    .sort_values()
+)
+
+fig, ax = plt.subplots(figsize=(9, 6))
+forest_importance.plot(kind='barh', color='steelblue', ax=ax)
+ax.set_title('Top 15 Random Forest Features')
+ax.set_xlabel('Importance')
+plt.show()
+```
+
+### Logistic regression
+
+```{python}
+scaler = StandardScaler()
+X_train_log = scaler.fit_transform(X_train_sig)
+X_test_log = scaler.transform(X_test_sig)
+
+logistic_model = LogisticRegression(
+    C=1,
+    max_iter=400,
+    solver='newton-cg'
+)
+logistic_model.fit(X_train_log, y_train['normalized_salary_bins'])
+
+log_pred_test = logistic_model.predict(X_test_log)
+log_kappa = cohen_kappa_score(y_test['normalized_salary_bins'], log_pred_test)
+log_kappa
+```
+
+```{python}
+ConfusionMatrixDisplay.from_predictions(
+    y_test['normalized_salary_bins'],
+    log_pred_test,
+    display_labels=logistic_model.classes_,
+    cmap='Purples'
+)
+plt.title('Logistic Regression Confusion Matrix')
+plt.show()
+```
+
+### Naive Bayes
+
+```{python}
+nb_model = GaussianNB()
+nb_model.fit(X_train_sig, y_train['normalized_salary_bins'])
+
+nb_pred_test = nb_model.predict(X_test_sig)
+nb_kappa = cohen_kappa_score(y_test['normalized_salary_bins'], nb_pred_test)
+nb_kappa
+```
+
+```{python}
+ConfusionMatrixDisplay.from_predictions(
+    y_test['normalized_salary_bins'],
+    nb_pred_test,
+    display_labels=nb_model.classes_,
+    cmap='Greens'
+)
+plt.title('Gaussian Naive Bayes Confusion Matrix')
+plt.show()
+```
+
+### Neural network
+
+```{python}
+label_encoder = LabelEncoder()
+y_train_encoded = label_encoder.fit_transform(y_train['normalized_salary_bins'])
+y_test_encoded = label_encoder.transform(y_test['normalized_salary_bins'])
+
+X_train_nn = torch.tensor(X_train_log, dtype=torch.float32)
+X_test_nn = torch.tensor(X_test_log, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train_encoded, dtype=torch.long)
+```
+
+```{python}
+class SalaryNN(nn.Module):
+    def __init__(self, input_size, num_classes):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.out = nn.Linear(32, num_classes)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        return self.out(x)
+
+model = SalaryNN(X_train_log.shape[1], len(label_encoder.classes_))
+
+class_counts = np.bincount(y_train_encoded)
+class_weights = torch.tensor(1 / class_counts, dtype=torch.float32)
+
+criterion = nn.CrossEntropyLoss(weight=class_weights)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+for _ in range(100):
+    optimizer.zero_grad()
+    outputs = model(X_train_nn)
+    loss = criterion(outputs, y_train_tensor)
+    loss.backward()
+    optimizer.step()
+```
+
+```{python}
+model.eval()
+with torch.no_grad():
+    test_outputs = model(X_test_nn)
+    nn_pred_encoded = torch.argmax(test_outputs, dim=1).numpy()
+
+nn_pred_test = label_encoder.inverse_transform(nn_pred_encoded)
+n_kappa = cohen_kappa_score(y_test['normalized_salary_bins'], nn_pred_test)
+n_kappa
+```
+
+## Model results
+
+```{python}
+results = pd.DataFrame({
+    'model': ['Random Forest', 'Logistic Regression', 'Gaussian Naive Bayes', 'Neural Network'],
+    'cohen_kappa_test': [forest_kappa, log_kappa, nb_kappa, n_kappa]
+}).sort_values('cohen_kappa_test', ascending=False)
+results
+```
+
+```{python}
+fig, ax = plt.subplots(figsize=(8, 4.5))
+sns.barplot(data=results, x='cohen_kappa_test', y='model', palette='crest', ax=ax)
+ax.set_title('Holdout Cohen\'s Kappa by Model')
+ax.set_xlabel("Cohen's kappa")
+ax.set_ylabel('')
+plt.show()
+```
+
+## Notes and limitations
+
+::: {.callout-important collapse="true"}
+## Modeling caveats
+
+- Salary thresholds are externally defined and may not map cleanly to job-market segments in the source data.
+- The workflow relies heavily on text fields, which can be noisy and unstable across employers.
+- Feature screening via linear regression is useful for compactness, but it is not a substitute for pipeline-based cross-validation.
+- PCA improves compactness but reduces interpretability and changes which models are appropriate.
+:::
