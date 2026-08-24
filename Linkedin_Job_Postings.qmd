@@ -31,8 +31,17 @@ This report builds a salary classification workflow using LinkedIn job posting d
 ::: {.callout-note}
 ## Data sources
 
-- [LinkedIn Job Postings dataset (Kaggle)](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings)
-- [Income bracket reference (Investopedia)](https://www.investopedia.com/upper-middle-and-lower-income-brackets-defined-how-much-income-counts-for-each-category-11932486)
+* [LinkedIn Job Postings dataset (Kaggle)](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings)
+  * The source data was downloaded as a `.csv` and converted to Parquet to reduce file size:
+    ```python
+    jobs.to_parquet(
+        "source_data_zstd.parquet",
+        engine="pyarrow",
+        compression="zstd",
+        compression_level=15,
+    )
+    ```
+* [Income bracket reference (Investopedia)](https://www.investopedia.com/upper-middle-and-lower-income-brackets-defined-how-much-income-counts-for-each-category-11932486)
 :::
 
 ## Setup
@@ -60,7 +69,7 @@ import torch.optim as optim
 ```
 
 ```{python}
-jobs = pd.read_csv('data/postings.csv')
+jobs = pd.read_parquet("data/source_data_zstd.parquet")
 jobs.head()
 ```
 
@@ -73,10 +82,10 @@ The `normalized_salary` field contains missing values and a small number of extr
 Salary categories were defined using 2024 U.S. median household income benchmarks described by [Investopedia](https://www.investopedia.com/upper-middle-and-lower-income-brackets-defined-how-much-income-counts-for-each-category-11932486). The thresholds use two-thirds of the median household income for the lower-income cutoff and twice the median household income for the upper-income cutoff.
 
 | Salary bin | Annual normalized salary |
-|---|---:|
-| Lower | $0 to $55,819 |
-| Middle | $55,820 to $167,459 |
-| Upper | $167,460 and above |
+|------------|-------------------------:|
+| Lower      |          \$0 to \$55,819 |
+| Middle     |    \$55,820 to \$167,459 |
+| Upper      |      \$167,460 and above |
 
 ```{python}
 #| echo: true
@@ -456,8 +465,8 @@ plt.show()
 ::: {.callout-important collapse="true"}
 ## Modeling caveats
 
-- Salary thresholds are externally defined and may not map cleanly to job-market segments in the source data.
-- The workflow relies heavily on text fields, which can be noisy and unstable across employers.
-- Feature screening via linear regression is useful for compactness, but it is not a substitute for pipeline-based cross-validation.
-- PCA improves compactness but reduces interpretability and changes which models are appropriate.
+-   Salary thresholds are externally defined and may not map cleanly to job-market segments in the source data.
+-   The workflow relies heavily on text fields, which can be noisy and unstable across employers.
+-   Feature screening via linear regression is useful for compactness, but it is not a substitute for pipeline-based cross-validation.
+-   PCA improves compactness but reduces interpretability and changes which models are appropriate.
 :::
