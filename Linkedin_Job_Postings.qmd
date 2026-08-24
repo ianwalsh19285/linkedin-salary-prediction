@@ -118,6 +118,9 @@ fig, ax = plt.subplots(figsize=(9, 5))
 sns.histplot(data=jobs_cleaned, x='normalized_salary', bins=40, ax=ax)
 ax.set_title('Normalized Salary Distribution After Trimming')
 ax.set_xlabel('Normalized salary')
+plt.savefig(
+    "plots/normalized_salary_distribution_after_trimming.png", bbox_inches="tight", dpi=300
+)
 plt.show()
 ```
 
@@ -318,6 +321,9 @@ ConfusionMatrixDisplay.from_predictions(
     cmap='Blues'
 )
 plt.title('Random Forest Confusion Matrix')
+plt.savefig(
+    "plots/random_forest_confusion_matrix.png", bbox_inches="tight", dpi=300
+)
 plt.show()
 ```
 
@@ -333,6 +339,9 @@ fig, ax = plt.subplots(figsize=(9, 6))
 forest_importance.plot(kind='barh', color='steelblue', ax=ax)
 ax.set_title('Top 15 Random Forest Features')
 ax.set_xlabel('Importance')
+plt.savefig(
+    "plots/top_15_random_forest_features.png", bbox_inches="tight", dpi=300
+)
 plt.show()
 ```
 
@@ -363,6 +372,9 @@ ConfusionMatrixDisplay.from_predictions(
     cmap='Purples'
 )
 plt.title('Logistic Regression Confusion Matrix')
+plt.savefig(
+    "plots/logistic_regression_confusion_matrix.png", bbox_inches="tight", dpi=300
+)
 plt.show()
 ```
 
@@ -385,6 +397,9 @@ ConfusionMatrixDisplay.from_predictions(
     cmap='Greens'
 )
 plt.title('Gaussian Naive Bayes Confusion Matrix')
+plt.savefig(
+    "plots/gaussian_naive_bayes_confusion_matrix.png", bbox_inches="tight", dpi=300
+)
 plt.show()
 ```
 
@@ -457,6 +472,9 @@ sns.barplot(data=results, x='cohen_kappa_test', y='model', palette='crest', ax=a
 ax.set_title('Holdout Cohen\'s Kappa by Model')
 ax.set_xlabel("Cohen's kappa")
 ax.set_ylabel('')
+plt.savefig(
+    "plots/holdout_cohen_kappa_by_model.png", bbox_inches="tight", dpi=300
+)
 plt.show()
 ```
 
