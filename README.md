@@ -7,7 +7,7 @@ Machine learning project using LinkedIn job-posting data to classify jobs into l
 * **Ian Walsh**
 * **Logan Rosell**
 
-[View the Ian's full project summary](https://ianwalsh19285.github.io/projects/linkedin-analysis/)
+[View Ian's full project summary](https://ianwalsh19285.github.io/projects/linkedin-analysis/)
 
 ### Repo Structure
 ```text
